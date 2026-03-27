@@ -160,9 +160,6 @@ OVERRIDE_COLUMNS = [
     "original_decision", "overridden_decision", "override_reason", "credit_officer_notes"
 ]
 
-# -------------------------------
-# PAGE SETUP
-# -------------------------------
 st.set_page_config(
     page_title=APP_NAME,
     page_icon="🏦",
@@ -170,9 +167,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# -------------------------------
-# STYLES
-# -------------------------------
+
 def inject_global_styles() -> None:
     st.markdown(
         """
@@ -196,11 +191,10 @@ def inject_global_styles() -> None:
         unsafe_allow_html=True,
     )
 
+
 inject_global_styles()
 
-# -------------------------------
-# HELPERS
-# -------------------------------
+
 def page_header(title: str, subtitle: str) -> None:
     st.markdown(f'<div class="app-title">{title}</div>', unsafe_allow_html=True)
     st.markdown(f'<div class="app-subtitle">{subtitle}</div>', unsafe_allow_html=True)
@@ -208,7 +202,7 @@ def page_header(title: str, subtitle: str) -> None:
 
 def kpi_card(label: str, value: str) -> None:
     st.markdown(
-        f'''<div class="kpi-card"><div class="kpi-label">{label}</div><div class="kpi-value">{value}</div></div>''',
+        f'<div class="kpi-card"><div class="kpi-label">{label}</div><div class="kpi-value">{value}</div></div>',
         unsafe_allow_html=True,
     )
 
@@ -517,9 +511,7 @@ def process_batch(df: pd.DataFrame, rules: Dict[str, Any]) -> Tuple[pd.DataFrame
     }
     return scored_df, exceptions_df, summary
 
-# -------------------------------
-# CHARTS
-# -------------------------------
+
 def decision_donut(df: pd.DataFrame):
     if df.empty or "decision" not in df.columns:
         return px.pie(pd.DataFrame({"decision": ["No data"], "count": [1]}), names="decision", values="count")
@@ -617,16 +609,13 @@ def override_by_user_chart(df: pd.DataFrame):
     fig.update_layout(margin=dict(l=10, r=10, t=10, b=10), height=360)
     return fig
 
-# -------------------------------
-# INITIALIZE STORAGE
-# -------------------------------
+
 ensure_file(SCORED_APPLICATIONS_FILE, SCORED_COLUMNS)
 ensure_file(AUDIT_LOG_FILE, AUDIT_COLUMNS)
 ensure_file(OVERRIDE_LOG_FILE, OVERRIDE_COLUMNS)
 ensure_file(BATCH_SCORED_OUTPUT_FILE, SCORED_COLUMNS + ["row_number", "recommendation"])
 ensure_file(BATCH_EXCEPTION_OUTPUT_FILE, REQUIRED_BATCH_COLUMNS + ["row_number", "error_type", "error_details"])
 
-# Seed a few records once
 scored_df_existing = load_table(SCORED_APPLICATIONS_FILE, SCORED_COLUMNS)
 if scored_df_existing.empty:
     seed_rows = [
@@ -657,9 +646,6 @@ if scored_df_existing.empty:
     ]
     overwrite_table(SCORED_APPLICATIONS_FILE, pd.DataFrame(seed_rows), SCORED_COLUMNS)
 
-# -------------------------------
-# SIDEBAR NAVIGATION
-# -------------------------------
 page = st.sidebar.radio(
     "Navigation",
     ["Dashboard", "New Application", "Batch Scoring", "Decision Audit", "Advanced Analytics"],
@@ -668,9 +654,6 @@ page = st.sidebar.radio(
 st.sidebar.markdown("---")
 st.sidebar.caption(f"{APP_NAME}\nVersion: {APP_VERSION}")
 
-# -------------------------------
-# PAGE: DASHBOARD
-# -------------------------------
 if page == "Dashboard":
     page_header("Portfolio Dashboard", "Executive summary of scored applications, decisions, overrides, and portfolio mix.")
     df = load_table(SCORED_APPLICATIONS_FILE, SCORED_COLUMNS)
@@ -723,9 +706,6 @@ if page == "Dashboard":
             st.write(recent_df.to_html(escape=False, index=False), unsafe_allow_html=True)
             st.markdown('</div>', unsafe_allow_html=True)
 
-# -------------------------------
-# PAGE: NEW APPLICATION
-# -------------------------------
 elif page == "New Application":
     page_header("New Application Scoring", "Capture applicant information, run policy checks, record audit events, and manage overrides.")
     rules = DEFAULT_RULES
@@ -877,9 +857,6 @@ elif page == "New Application":
                 st.info("Current role is read-only for overrides. Switch role to approver or admin to test override workflow.")
             st.markdown('</div>', unsafe_allow_html=True)
 
-# -------------------------------
-# PAGE: BATCH SCORING
-# -------------------------------
 elif page == "Batch Scoring":
     page_header("Batch Scoring", "Upload multiple loan applications, validate rows, score valid cases, and generate exception reports.")
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
@@ -982,9 +959,6 @@ elif page == "Batch Scoring":
         except Exception as e:
             st.error(f"Batch processing failed: {str(e)}")
 
-# -------------------------------
-# PAGE: DECISION AUDIT
-# -------------------------------
 elif page == "Decision Audit":
     page_header("Decision Audit & Search", "Search scored decisions, inspect audit records, and review overrides for governance control.")
     audit_df = load_table(AUDIT_LOG_FILE, AUDIT_COLUMNS)
@@ -1034,13 +1008,9 @@ elif page == "Decision Audit":
         st.download_button("Download override log CSV", overrides_df.to_csv(index=False).encode("utf-8"), "override_log.csv", "text/csv")
     st.markdown('</div>', unsafe_allow_html=True)
 
-# -------------------------------
-# PAGE: ADVANCED ANALYTICS (PHASE 4)
-# -------------------------------
 elif page == "Advanced Analytics":
     page_header("Advanced Analytics", "Portfolio intelligence across decisions, branches, bureau segments, decline reasons, and overrides.")
     df = load_table(SCORED_APPLICATIONS_FILE, SCORED_COLUMNS)
-    audit_df = load_table(AUDIT_LOG_FILE, AUDIT_COLUMNS)
     overrides_df = load_table(OVERRIDE_LOG_FILE, OVERRIDE_COLUMNS)
 
     if df.empty:
@@ -1133,9 +1103,6 @@ elif page == "Advanced Analytics":
         )
         st.markdown('</div>', unsafe_allow_html=True)
 
-# -------------------------------
-# FOOTER
-# -------------------------------
 st.markdown("---")
 st.caption(
     "Ready-to-run single-file build. Install: streamlit, pandas, plotly. For Excel upload support also install openpyxl. "
