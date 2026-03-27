@@ -19,7 +19,7 @@ import streamlit as st
 # -------------------------------
 # APP CONFIG
 # -------------------------------
-APP_NAME = "AB Microfinance Credit Decisioning Platform"
+APP_NAME = "Credit Decisioning Platform"
 APP_VERSION = "2.0.0-single-file-phase4"
 
 OUTPUT_DIR = "outputs"
