@@ -19,7 +19,7 @@ import streamlit as st
 # -------------------------------
 # APP CONFIG
 # -------------------------------
-APP_NAME = "Credit Decisioning Platform"
+APP_NAME = "AB Microfinance Privacy-Aware Credit Decisioning Platform"
 APP_VERSION = "2.0.0-single-file-phase4"
 
 OUTPUT_DIR = "outputs"
@@ -37,12 +37,20 @@ DECISION_COLORS = {
 }
 
 USER_ROLES = ["viewer", "scorer", "approver", "admin"]
+
+PRIVACY_CONFIG = {
+    "store_personal_data": False,
+    "anonymize_outputs": True,
+    "log_minimum_required": True,
+}
+
+DATA_RETENTION_DAYS = 90
 AUTHORIZED_OVERRIDE_ROLES = ["approver", "admin"]
 
 REQUIRED_BATCH_COLUMNS = [
     "application_id",
-    "branch",
-    "officer_name",
+    "branch_code",
+    "officer_id",
     "age",
     "monthly_net_income",
     "employment_type",
@@ -142,7 +150,7 @@ DEFAULT_RULES = {
 }
 
 SCORED_COLUMNS = [
-    "application_id", "branch", "officer_name", "age", "monthly_net_income", "employment_type",
+    "application_id", "branch_code", "officer_id", "age", "monthly_net_income", "employment_type",
     "employment_tenure_months", "residence_stability_months", "bureau_flag", "existing_obligations_ratio",
     "account_turnover_strength", "savings_behaviour", "bvn_verification", "bank_account_vintage_months",
     "notes", "total_score", "decision", "risk_band", "reject_reasons", "final_decision",
@@ -150,16 +158,19 @@ SCORED_COLUMNS = [
 ]
 
 AUDIT_COLUMNS = [
-    "audit_id", "event_timestamp", "event_type", "application_id", "user_name", "user_role",
+    "audit_id", "event_timestamp", "event_type", "application_id", "user_id", "user_role",
     "scorecard_version", "original_decision", "final_decision", "risk_band", "total_score",
     "reject_reasons", "override_flag", "override_reason", "input_payload_json", "component_scores_json", "notes"
 ]
 
 OVERRIDE_COLUMNS = [
-    "override_id", "override_timestamp", "application_id", "override_user", "override_user_role",
-    "original_decision", "overridden_decision", "override_reason", "credit_officer_notes"
+    "override_id", "override_timestamp", "application_id", "override_user_id", "override_user_role",
+    "original_decision", "overridden_decision", "override_reason", "underwriter_notes"
 ]
 
+# -------------------------------
+# PAGE SETUP
+# -------------------------------
 st.set_page_config(
     page_title=APP_NAME,
     page_icon="🏦",
@@ -167,7 +178,9 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-
+# -------------------------------
+# STYLES
+# -------------------------------
 def inject_global_styles() -> None:
     st.markdown(
         """
@@ -191,10 +204,11 @@ def inject_global_styles() -> None:
         unsafe_allow_html=True,
     )
 
-
 inject_global_styles()
 
-
+# -------------------------------
+# HELPERS
+# -------------------------------
 def page_header(title: str, subtitle: str) -> None:
     st.markdown(f'<div class="app-title">{title}</div>', unsafe_allow_html=True)
     st.markdown(f'<div class="app-subtitle">{subtitle}</div>', unsafe_allow_html=True)
@@ -202,7 +216,7 @@ def page_header(title: str, subtitle: str) -> None:
 
 def kpi_card(label: str, value: str) -> None:
     st.markdown(
-        f'<div class="kpi-card"><div class="kpi-label">{label}</div><div class="kpi-value">{value}</div></div>',
+        f'''<div class="kpi-card"><div class="kpi-label">{label}</div><div class="kpi-value">{value}</div></div>''',
         unsafe_allow_html=True,
     )
 
@@ -287,6 +301,12 @@ def validate_application(data: Dict[str, Any]) -> List[str]:
         errors.append("Residence stability cannot be negative.")
     if float(data.get("bank_account_vintage_months", 0)) < 0:
         errors.append("Bank account vintage cannot be negative.")
+    if not str(data.get("application_id", "")).strip():
+        errors.append("Application ID is required.")
+    if not str(data.get("branch_code", "")).strip():
+        errors.append("Branch code is required.")
+    if not str(data.get("officer_id", "")).strip():
+        errors.append("Officer ID is required.")
     return errors
 
 
@@ -379,13 +399,35 @@ def explain_result(component_scores: Dict[str, int], reject_reasons: List[str]) 
     return {"positive_factors": positive, "negative_factors": negative, "policy_flags": policy}
 
 
-def log_scoring_event(application: Dict[str, Any], result: Dict[str, Any], user_name: str, user_role: str, scorecard_version: str) -> None:
+def ethical_ai_check(application: Dict[str, Any]) -> List[str]:
+    warnings = []
+    if application.get("bureau_flag") == "No bureau history":
+        warnings.append("Thin-file customer detected. Review for possible exclusion risk and ensure proportional human judgment.")
+    if float(application.get("monthly_net_income", 0)) < 50000:
+        warnings.append("Low-income applicant detected. Confirm affordability logic is being applied consistently and not unfairly.")
+    if float(application.get("age", 0)) < 21:
+        warnings.append("Younger applicant detected. Confirm the final outcome is policy-based and free from age-related overreach.")
+    warnings.append("This tool is decision support only. Final lending action should remain under accountable human oversight.")
+    return warnings
+
+
+def sanitize_application_payload(application: Dict[str, Any]) -> Dict[str, Any]:
+    allowed_keys = {
+        "application_id", "branch_code", "officer_id", "age", "monthly_net_income", "employment_type",
+        "employment_tenure_months", "residence_stability_months", "bureau_flag", "existing_obligations_ratio",
+        "account_turnover_strength", "savings_behaviour", "bvn_verification", "bank_account_vintage_months", "notes"
+    }
+    return {k: application.get(k, "") for k in allowed_keys}
+
+
+def log_scoring_event(application: Dict[str, Any], result: Dict[str, Any], user_id: str, user_role: str, scorecard_version: str) -> None:
+    safe_application = sanitize_application_payload(application)
     audit_row = {
         "audit_id": f"AUD-{application['application_id']}-{datetime.now().strftime('%Y%m%d%H%M%S%f')}",
         "event_timestamp": datetime.now().isoformat(timespec="seconds"),
         "event_type": "score_application",
         "application_id": application["application_id"],
-        "user_name": user_name,
+        "user_id": user_id,
         "user_role": user_role,
         "scorecard_version": scorecard_version,
         "original_decision": result["decision"],
@@ -395,7 +437,7 @@ def log_scoring_event(application: Dict[str, Any], result: Dict[str, Any], user_
         "reject_reasons": " | ".join(result["reject_reasons"]),
         "override_flag": "No",
         "override_reason": "",
-        "input_payload_json": json.dumps(application, default=str),
+        "input_payload_json": json.dumps(safe_application, default=str),
         "component_scores_json": json.dumps(result["component_scores"], default=str),
         "notes": application.get("notes", ""),
     }
@@ -407,8 +449,8 @@ def can_override(user_role: str) -> bool:
 
 
 def apply_override_to_logs(application_id: str, original_decision: str, overridden_decision: str,
-                           override_reason: str, override_user: str, override_user_role: str,
-                           credit_officer_notes: str = "") -> Tuple[bool, str]:
+                           override_reason: str, override_user_id: str, override_user_role: str,
+                           underwriter_notes: str = "") -> Tuple[bool, str]:
     if not can_override(override_user_role):
         return False, "Current user role is not authorized to perform overrides."
     if not override_reason.strip():
@@ -420,12 +462,12 @@ def apply_override_to_logs(application_id: str, original_decision: str, overridd
         "override_id": f"OVR-{application_id}-{datetime.now().strftime('%Y%m%d%H%M%S%f')}",
         "override_timestamp": datetime.now().isoformat(timespec="seconds"),
         "application_id": application_id,
-        "override_user": override_user,
+        "override_user_id": override_user_id,
         "override_user_role": override_user_role,
         "original_decision": original_decision,
         "overridden_decision": overridden_decision,
         "override_reason": override_reason.strip(),
-        "credit_officer_notes": credit_officer_notes,
+        "underwriter_notes": underwriter_notes,
     }
     append_row(OVERRIDE_LOG_FILE, override_row, OVERRIDE_COLUMNS)
 
@@ -511,7 +553,9 @@ def process_batch(df: pd.DataFrame, rules: Dict[str, Any]) -> Tuple[pd.DataFrame
     }
     return scored_df, exceptions_df, summary
 
-
+# -------------------------------
+# CHARTS
+# -------------------------------
 def decision_donut(df: pd.DataFrame):
     if df.empty or "decision" not in df.columns:
         return px.pie(pd.DataFrame({"decision": ["No data"], "count": [1]}), names="decision", values="count")
@@ -583,9 +627,9 @@ def branch_approval_rate(df: pd.DataFrame):
         return px.bar(pd.DataFrame({"branch": [], "approval_rate": []}), x="branch", y="approval_rate")
     tmp = df.copy()
     tmp["approved_flag"] = (tmp["final_decision"].fillna(tmp["decision"]) == "Approve").astype(int)
-    plot_df = tmp.groupby("branch", as_index=False)["approved_flag"].mean()
+    plot_df = tmp.groupby("branch_code", as_index=False)["approved_flag"].mean()
     plot_df["approval_rate"] = (plot_df["approved_flag"] * 100).round(1)
-    fig = px.bar(plot_df.sort_values("approval_rate", ascending=False), x="branch", y="approval_rate")
+    fig = px.bar(plot_df.sort_values("approval_rate", ascending=False), x="branch_code", y="approval_rate")
     fig.update_layout(margin=dict(l=10, r=10, t=10, b=10), height=360, yaxis_title="Approval rate (%)")
     return fig
 
@@ -603,24 +647,27 @@ def bureau_mix_chart(df: pd.DataFrame):
 def override_by_user_chart(df: pd.DataFrame):
     if df.empty:
         return px.bar(pd.DataFrame({"override_user": [], "count": []}), x="override_user", y="count")
-    plot_df = df["override_user"].value_counts().reset_index()
-    plot_df.columns = ["override_user", "count"]
-    fig = px.bar(plot_df, x="override_user", y="count")
+    plot_df = df["override_user_id"].value_counts().reset_index()
+    plot_df.columns = ["override_user_id", "count"]
+    fig = px.bar(plot_df, x="override_user_id", y="count")
     fig.update_layout(margin=dict(l=10, r=10, t=10, b=10), height=360)
     return fig
 
-
+# -------------------------------
+# INITIALIZE STORAGE
+# -------------------------------
 ensure_file(SCORED_APPLICATIONS_FILE, SCORED_COLUMNS)
 ensure_file(AUDIT_LOG_FILE, AUDIT_COLUMNS)
 ensure_file(OVERRIDE_LOG_FILE, OVERRIDE_COLUMNS)
 ensure_file(BATCH_SCORED_OUTPUT_FILE, SCORED_COLUMNS + ["row_number", "recommendation"])
 ensure_file(BATCH_EXCEPTION_OUTPUT_FILE, REQUIRED_BATCH_COLUMNS + ["row_number", "error_type", "error_details"])
 
+# Seed a few records once
 scored_df_existing = load_table(SCORED_APPLICATIONS_FILE, SCORED_COLUMNS)
 if scored_df_existing.empty:
     seed_rows = [
         {
-            "application_id": "APP-0901", "branch": "Lagos Mainland", "officer_name": "A. Ajayi", "age": 32,
+            "application_id": "APP-0901", "branch_code": "BR-001", "officer_id": "OF-001", "age": 32,
             "monthly_net_income": 180000, "employment_type": "Private salaried", "employment_tenure_months": 28,
             "residence_stability_months": 24, "bureau_flag": "Clean", "existing_obligations_ratio": 22,
             "account_turnover_strength": "Strong", "savings_behaviour": "Regular", "bvn_verification": "Verified and consistent",
@@ -628,7 +675,7 @@ if scored_df_existing.empty:
             "reject_reasons": "", "final_decision": "Approve", "override_flag": "No", "timestamp": "2026-03-25T09:12:00"
         },
         {
-            "application_id": "APP-0902", "branch": "Ibadan Central", "officer_name": "M. Bello", "age": 24,
+            "application_id": "APP-0902", "branch_code": "BR-002", "officer_id": "OF-002", "age": 24,
             "monthly_net_income": 70000, "employment_type": "Informal business", "employment_tenure_months": 8,
             "residence_stability_months": 10, "bureau_flag": "Minor issues", "existing_obligations_ratio": 35,
             "account_turnover_strength": "Moderate", "savings_behaviour": "Irregular", "bvn_verification": "Verified and consistent",
@@ -636,7 +683,7 @@ if scored_df_existing.empty:
             "reject_reasons": "", "final_decision": "Decline", "override_flag": "No", "timestamp": "2026-03-25T10:03:00"
         },
         {
-            "application_id": "APP-0905", "branch": "Port Harcourt", "officer_name": "G. Uche", "age": 35,
+            "application_id": "APP-0905", "branch_code": "BR-003", "officer_id": "OF-003", "age": 35,
             "monthly_net_income": 120000, "employment_type": "Private salaried", "employment_tenure_months": 18,
             "residence_stability_months": 20, "bureau_flag": "No bureau history", "existing_obligations_ratio": 28,
             "account_turnover_strength": "Moderate", "savings_behaviour": "Regular", "bvn_verification": "Verified with minor mismatch",
@@ -646,6 +693,9 @@ if scored_df_existing.empty:
     ]
     overwrite_table(SCORED_APPLICATIONS_FILE, pd.DataFrame(seed_rows), SCORED_COLUMNS)
 
+# -------------------------------
+# SIDEBAR NAVIGATION
+# -------------------------------
 page = st.sidebar.radio(
     "Navigation",
     ["Dashboard", "New Application", "Batch Scoring", "Decision Audit", "Advanced Analytics"],
@@ -654,6 +704,9 @@ page = st.sidebar.radio(
 st.sidebar.markdown("---")
 st.sidebar.caption(f"{APP_NAME}\nVersion: {APP_VERSION}")
 
+# -------------------------------
+# PAGE: DASHBOARD
+# -------------------------------
 if page == "Dashboard":
     page_header("Portfolio Dashboard", "Executive summary of scored applications, decisions, overrides, and portfolio mix.")
     df = load_table(SCORED_APPLICATIONS_FILE, SCORED_COLUMNS)
@@ -700,12 +753,15 @@ if page == "Dashboard":
         with right2:
             st.markdown('<div class="section-card">', unsafe_allow_html=True)
             st.subheader("Recent applications")
-            show_cols = ["application_id", "branch", "officer_name", "employment_type", "total_score", "final_decision", "timestamp"]
+            show_cols = ["application_id", "branch_code", "officer_id", "employment_type", "total_score", "final_decision", "timestamp"]
             recent_df = df.sort_values("timestamp", ascending=False).head(10)[show_cols].copy()
             recent_df["final_decision"] = recent_df["final_decision"].apply(lambda x: decision_badge(str(x)))
             st.write(recent_df.to_html(escape=False, index=False), unsafe_allow_html=True)
             st.markdown('</div>', unsafe_allow_html=True)
 
+# -------------------------------
+# PAGE: NEW APPLICATION
+# -------------------------------
 elif page == "New Application":
     page_header("New Application Scoring", "Capture applicant information, run policy checks, record audit events, and manage overrides.")
     rules = DEFAULT_RULES
@@ -720,7 +776,7 @@ elif page == "New Application":
 
     with st.form("new_application_form"):
         identity_col1, identity_col2 = st.columns(2)
-        current_user = identity_col1.text_input("Logged-in user name", value="risk.officer")
+        current_user = identity_col1.text_input("Logged-in user ID", value="USR-001")
         current_role = identity_col2.selectbox("User role", USER_ROLES, index=1)
 
         tab1, tab2, tab3, tab4 = st.tabs([
@@ -730,8 +786,8 @@ elif page == "New Application":
         with tab1:
             c1, c2, c3 = st.columns(3)
             application_id = c1.text_input("Application ID", value=f"APP-{datetime.now().strftime('%H%M%S')}")
-            branch = c2.text_input("Branch", value="Lagos Mainland")
-            officer_name = c3.text_input("Credit officer", value="A. Ajayi")
+            branch_code = c2.text_input("Branch Code", value="BR-001")
+            officer_id = c3.text_input("Officer ID", value="OF-001")
             age = st.number_input("Age", min_value=18, max_value=75, value=31)
             residence_stability_months = st.number_input("Residence stability (months)", min_value=0, max_value=600, value=18)
 
@@ -759,8 +815,8 @@ elif page == "New Application":
     if submit:
         application = {
             "application_id": application_id,
-            "branch": branch,
-            "officer_name": officer_name,
+            "branch_code": branch_code,
+            "officer_id": officer_id,
             "age": age,
             "monthly_net_income": monthly_net_income,
             "employment_type": employment_type,
@@ -848,15 +904,32 @@ elif page == "New Application":
                     original_decision=result["decision"],
                     overridden_decision=override_decision,
                     override_reason=override_reason,
-                    override_user=current_user,
+                    override_user_id=current_user,
                     override_user_role=current_role,
-                    credit_officer_notes=notes,
+                    underwriter_notes=notes,
                 )
                 status_banner(message, "success" if success else "error")
             if not override_allowed:
                 st.info("Current role is read-only for overrides. Switch role to approver or admin to test override workflow.")
             st.markdown('</div>', unsafe_allow_html=True)
 
+            st.markdown('<div class="section-card">', unsafe_allow_html=True)
+            st.subheader("Privacy, GDPR, and Ethical AI")
+            st.write("• No direct personal identifiers are stored in this application.")
+            st.write("• Only pseudonymous operational identifiers are retained for accountability.")
+            st.write("• BVN status is assessed, but BVN values themselves are not stored.")
+            st.write("• This tool is decision support only and does not replace accountable human lending judgment.")
+            st.write(f"• Indicative retention setting: {DATA_RETENTION_DAYS} days.")
+            ethical_flags = ethical_ai_check(application)
+            st.caption("Fairness and ethics prompts")
+            for flag in ethical_flags:
+                st.write(f"• {flag}")
+            st.info("This decision is based on a transparent rule-based scorecard and should support, not replace, accountable human judgment.")
+            st.markdown('</div>', unsafe_allow_html=True)
+
+# -------------------------------
+# PAGE: BATCH SCORING
+# -------------------------------
 elif page == "Batch Scoring":
     page_header("Batch Scoring", "Upload multiple loan applications, validate rows, score valid cases, and generate exception reports.")
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
@@ -891,8 +964,8 @@ elif page == "Batch Scoring":
                     if str(r["application_id"]) not in existing_ids:
                         append_row(SCORED_APPLICATIONS_FILE, {
                             "application_id": r["application_id"],
-                            "branch": r["branch"],
-                            "officer_name": r["officer_name"],
+                            "branch_code": r["branch_code"],
+                            "officer_id": r["officer_id"],
                             "age": r["age"],
                             "monthly_net_income": r["monthly_net_income"],
                             "employment_type": r["employment_type"],
@@ -959,6 +1032,9 @@ elif page == "Batch Scoring":
         except Exception as e:
             st.error(f"Batch processing failed: {str(e)}")
 
+# -------------------------------
+# PAGE: DECISION AUDIT
+# -------------------------------
 elif page == "Decision Audit":
     page_header("Decision Audit & Search", "Search scored decisions, inspect audit records, and review overrides for governance control.")
     audit_df = load_table(AUDIT_LOG_FILE, AUDIT_COLUMNS)
@@ -973,7 +1049,7 @@ elif page == "Decision Audit":
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
     st.subheader("Search historical decisions")
     search_application = st.text_input("Search by application ID")
-    search_user = st.text_input("Search by user name")
+    search_user = st.text_input("Search by user ID")
     decision_filter = st.multiselect("Filter by final decision", ["Approve", "Refer", "Decline"], default=["Approve", "Refer", "Decline"])
     st.markdown('</div>', unsafe_allow_html=True)
 
@@ -982,7 +1058,7 @@ elif page == "Decision Audit":
         if search_application.strip():
             filtered_audit = filtered_audit[filtered_audit["application_id"].astype(str).str.contains(search_application.strip(), case=False, na=False)]
         if search_user.strip():
-            filtered_audit = filtered_audit[filtered_audit["user_name"].astype(str).str.contains(search_user.strip(), case=False, na=False)]
+            filtered_audit = filtered_audit[filtered_audit["user_id"].astype(str).str.contains(search_user.strip(), case=False, na=False)]
         filtered_audit = filtered_audit[filtered_audit["final_decision"].isin(decision_filter)]
 
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
@@ -991,7 +1067,7 @@ elif page == "Decision Audit":
         st.info("No audit records found for the selected filters.")
     else:
         audit_display = filtered_audit[[
-            "event_timestamp", "application_id", "user_name", "user_role", "scorecard_version",
+            "event_timestamp", "application_id", "user_id", "user_role", "scorecard_version",
             "original_decision", "final_decision", "risk_band", "total_score", "override_flag", "override_reason"
         ]].copy()
         audit_display["final_decision"] = audit_display["final_decision"].apply(lambda x: decision_badge(str(x)))
@@ -1008,9 +1084,13 @@ elif page == "Decision Audit":
         st.download_button("Download override log CSV", overrides_df.to_csv(index=False).encode("utf-8"), "override_log.csv", "text/csv")
     st.markdown('</div>', unsafe_allow_html=True)
 
+# -------------------------------
+# PAGE: ADVANCED ANALYTICS (PHASE 4)
+# -------------------------------
 elif page == "Advanced Analytics":
     page_header("Advanced Analytics", "Portfolio intelligence across decisions, branches, bureau segments, decline reasons, and overrides.")
     df = load_table(SCORED_APPLICATIONS_FILE, SCORED_COLUMNS)
+    audit_df = load_table(AUDIT_LOG_FILE, AUDIT_COLUMNS)
     overrides_df = load_table(OVERRIDE_LOG_FILE, OVERRIDE_COLUMNS)
 
     if df.empty:
@@ -1025,14 +1105,14 @@ elif page == "Advanced Analytics":
         st.subheader("Analytics filters")
         f1, f2, f3, f4 = st.columns(4)
         decision_filter = f1.multiselect("Decision", sorted(df["final_decision"].dropna().unique().tolist()), default=sorted(df["final_decision"].dropna().unique().tolist()))
-        branch_filter = f2.multiselect("Branch", sorted(df["branch"].dropna().unique().tolist()), default=sorted(df["branch"].dropna().unique().tolist()))
+        branch_filter = f2.multiselect("Branch Code", sorted(df["branch_code"].dropna().unique().tolist()), default=sorted(df["branch_code"].dropna().unique().tolist()))
         employment_filter = f3.multiselect("Employment type", sorted(df["employment_type"].dropna().unique().tolist()), default=sorted(df["employment_type"].dropna().unique().tolist()))
         score_range = f4.slider("Score range", 0, 120, (0, 120))
         st.markdown('</div>', unsafe_allow_html=True)
 
         filt = df[
             df["final_decision"].isin(decision_filter)
-            & df["branch"].isin(branch_filter)
+            & df["branch_code"].isin(branch_filter)
             & df["employment_type"].isin(employment_filter)
             & df["total_score"].between(score_range[0], score_range[1], inclusive="both")
         ].copy()
@@ -1043,7 +1123,7 @@ elif page == "Advanced Analytics":
         with c3: kpi_card("Average score", f"{round(filt['total_score'].mean(),1) if len(filt) else 0}")
         with c4: kpi_card("Median score", f"{round(filt['total_score'].median(),1) if len(filt) else 0}")
         with c5: kpi_card("Overrides", f"{int(filt['override_flag'].fillna('No').eq('Yes').sum()):,}")
-        with c6: kpi_card("Branches", f"{filt['branch'].nunique() if len(filt) else 0}")
+        with c6: kpi_card("Branches", f"{filt['branch_code'].nunique() if len(filt) else 0}")
 
         row1_left, row1_right = st.columns(2)
         with row1_left:
@@ -1091,7 +1171,7 @@ elif page == "Advanced Analytics":
         st.markdown('<div class="section-card">', unsafe_allow_html=True)
         st.subheader("Filtered portfolio detail")
         detail_cols = [
-            "application_id", "branch", "officer_name", "employment_type", "bureau_flag",
+            "application_id", "branch_code", "officer_id", "employment_type", "bureau_flag",
             "total_score", "decision", "final_decision", "override_flag", "timestamp"
         ]
         st.dataframe(filt[detail_cols].sort_values("timestamp", ascending=False), use_container_width=True)
@@ -1103,9 +1183,12 @@ elif page == "Advanced Analytics":
         )
         st.markdown('</div>', unsafe_allow_html=True)
 
+# -------------------------------
+# FOOTER
+# -------------------------------
 st.markdown("---")
 st.caption(
     "Ready-to-run single-file build. Install: streamlit, pandas, plotly. For Excel upload support also install openpyxl. "
+    "This GDPR-aware version excludes direct personal names and uses pseudonymous operational identifiers only. "
     "Run with: streamlit run Judgmental_Scorecard_App.py"
 )
-
