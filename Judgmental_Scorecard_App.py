@@ -617,4 +617,527 @@ def override_by_user_chart(df: pd.DataFrame):
     fig.update_layout(margin=dict(l=10, r=10, t=10, b=10), height=360)
     return fig
 
-#
+# -------------------------------
+# INITIALIZE STORAGE
+# -------------------------------
+ensure_file(SCORED_APPLICATIONS_FILE, SCORED_COLUMNS)
+ensure_file(AUDIT_LOG_FILE, AUDIT_COLUMNS)
+ensure_file(OVERRIDE_LOG_FILE, OVERRIDE_COLUMNS)
+ensure_file(BATCH_SCORED_OUTPUT_FILE, SCORED_COLUMNS + ["row_number", "recommendation"])
+ensure_file(BATCH_EXCEPTION_OUTPUT_FILE, REQUIRED_BATCH_COLUMNS + ["row_number", "error_type", "error_details"])
+
+# Seed a few records once
+scored_df_existing = load_table(SCORED_APPLICATIONS_FILE, SCORED_COLUMNS)
+if scored_df_existing.empty:
+    seed_rows = [
+        {
+            "application_id": "APP-0901", "branch": "Lagos Mainland", "officer_name": "A. Ajayi", "age": 32,
+            "monthly_net_income": 180000, "employment_type": "Private salaried", "employment_tenure_months": 28,
+            "residence_stability_months": 24, "bureau_flag": "Clean", "existing_obligations_ratio": 22,
+            "account_turnover_strength": "Strong", "savings_behaviour": "Regular", "bvn_verification": "Verified and consistent",
+            "bank_account_vintage_months": 30, "notes": "", "total_score": 104, "decision": "Approve", "risk_band": "Low Risk",
+            "reject_reasons": "", "final_decision": "Approve", "override_flag": "No", "timestamp": "2026-03-25T09:12:00"
+        },
+        {
+            "application_id": "APP-0902", "branch": "Ibadan Central", "officer_name": "M. Bello", "age": 24,
+            "monthly_net_income": 70000, "employment_type": "Informal business", "employment_tenure_months": 8,
+            "residence_stability_months": 10, "bureau_flag": "Minor issues", "existing_obligations_ratio": 35,
+            "account_turnover_strength": "Moderate", "savings_behaviour": "Irregular", "bvn_verification": "Verified and consistent",
+            "bank_account_vintage_months": 12, "notes": "", "total_score": 58, "decision": "Decline", "risk_band": "High Risk",
+            "reject_reasons": "", "final_decision": "Decline", "override_flag": "No", "timestamp": "2026-03-25T10:03:00"
+        },
+        {
+            "application_id": "APP-0905", "branch": "Port Harcourt", "officer_name": "G. Uche", "age": 35,
+            "monthly_net_income": 120000, "employment_type": "Private salaried", "employment_tenure_months": 18,
+            "residence_stability_months": 20, "bureau_flag": "No bureau history", "existing_obligations_ratio": 28,
+            "account_turnover_strength": "Moderate", "savings_behaviour": "Regular", "bvn_verification": "Verified with minor mismatch",
+            "bank_account_vintage_months": 20, "notes": "", "total_score": 81, "decision": "Refer", "risk_band": "Medium Risk",
+            "reject_reasons": "", "final_decision": "Refer", "override_flag": "No", "timestamp": "2026-03-25T14:05:00"
+        },
+    ]
+    overwrite_table(SCORED_APPLICATIONS_FILE, pd.DataFrame(seed_rows), SCORED_COLUMNS)
+
+# -------------------------------
+# SIDEBAR NAVIGATION
+# -------------------------------
+page = st.sidebar.radio(
+    "Navigation",
+    ["Dashboard", "New Application", "Batch Scoring", "Decision Audit", "Advanced Analytics"],
+)
+
+st.sidebar.markdown("---")
+st.sidebar.caption(f"{APP_NAME}\nVersion: {APP_VERSION}")
+
+# -------------------------------
+# PAGE: DASHBOARD
+# -------------------------------
+if page == "Dashboard":
+    page_header("Portfolio Dashboard", "Executive summary of scored applications, decisions, overrides, and portfolio mix.")
+    df = load_table(SCORED_APPLICATIONS_FILE, SCORED_COLUMNS)
+    overrides_df = load_table(OVERRIDE_LOG_FILE, OVERRIDE_COLUMNS)
+
+    if df.empty:
+        st.warning("No scored applications found yet. Score an application to populate the dashboard.")
+    else:
+        total_apps = len(df)
+        approvals = int((df["final_decision"].fillna(df["decision"]) == "Approve").sum())
+        referrals = int((df["final_decision"].fillna(df["decision"]) == "Refer").sum())
+        declines = int((df["final_decision"].fillna(df["decision"]) == "Decline").sum())
+        avg_score = round(pd.to_numeric(df["total_score"], errors="coerce").mean(), 1)
+        override_rate = f"{round((len(overrides_df) / total_apps) * 100, 1) if total_apps else 0}%"
+
+        c1, c2, c3, c4, c5, c6 = st.columns(6)
+        with c1: kpi_card("Applications", f"{total_apps:,}")
+        with c2: kpi_card("Approvals", f"{approvals:,}")
+        with c3: kpi_card("Referrals", f"{referrals:,}")
+        with c4: kpi_card("Declines", f"{declines:,}")
+        with c5: kpi_card("Override rate", override_rate)
+        with c6: kpi_card("Average score", f"{avg_score}")
+
+        left, right = st.columns(2)
+        with left:
+            st.markdown('<div class="section-card">', unsafe_allow_html=True)
+            st.subheader("Decision distribution")
+            dd = df.copy()
+            dd["decision"] = dd["final_decision"].fillna(dd["decision"])
+            st.plotly_chart(decision_donut(dd), use_container_width=True)
+            st.markdown('</div>', unsafe_allow_html=True)
+        with right:
+            st.markdown('<div class="section-card">', unsafe_allow_html=True)
+            st.subheader("Score distribution")
+            st.plotly_chart(score_histogram(df), use_container_width=True)
+            st.markdown('</div>', unsafe_allow_html=True)
+
+        left2, right2 = st.columns(2)
+        with left2:
+            st.markdown('<div class="section-card">', unsafe_allow_html=True)
+            st.subheader("Average score by employment type")
+            st.plotly_chart(employment_avg_score(df), use_container_width=True)
+            st.markdown('</div>', unsafe_allow_html=True)
+        with right2:
+            st.markdown('<div class="section-card">', unsafe_allow_html=True)
+            st.subheader("Recent applications")
+            show_cols = ["application_id", "branch", "officer_name", "employment_type", "total_score", "final_decision", "timestamp"]
+            recent_df = df.sort_values("timestamp", ascending=False).head(10)[show_cols].copy()
+            recent_df["final_decision"] = recent_df["final_decision"].apply(lambda x: decision_badge(str(x)))
+            st.write(recent_df.to_html(escape=False, index=False), unsafe_allow_html=True)
+            st.markdown('</div>', unsafe_allow_html=True)
+
+# -------------------------------
+# PAGE: NEW APPLICATION
+# -------------------------------
+elif page == "New Application":
+    page_header("New Application Scoring", "Capture applicant information, run policy checks, record audit events, and manage overrides.")
+    rules = DEFAULT_RULES
+    score_vars = rules["score_variables"]
+    cutoffs = rules["decision_cutoffs"]
+    scorecard_version = rules["metadata"]["version"]
+
+    st.markdown('<div class="section-card">', unsafe_allow_html=True)
+    st.caption("Workflow progress")
+    st.progress(67, text="Phase 4 build: scoring, override control, audit logging, and analytics-ready storage")
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    with st.form("new_application_form"):
+        identity_col1, identity_col2 = st.columns(2)
+        current_user = identity_col1.text_input("Logged-in user name", value="risk.officer")
+        current_role = identity_col2.selectbox("User role", USER_ROLES, index=1)
+
+        tab1, tab2, tab3, tab4 = st.tabs([
+            "Personal Details", "Income & Employment", "Credit Exposure", "Behaviour & Verification"
+        ])
+
+        with tab1:
+            c1, c2, c3 = st.columns(3)
+            application_id = c1.text_input("Application ID", value=f"APP-{datetime.now().strftime('%H%M%S')}")
+            branch = c2.text_input("Branch", value="Lagos Mainland")
+            officer_name = c3.text_input("Credit officer", value="A. Ajayi")
+            age = st.number_input("Age", min_value=18, max_value=75, value=31)
+            residence_stability_months = st.number_input("Residence stability (months)", min_value=0, max_value=600, value=18)
+
+        with tab2:
+            c1, c2 = st.columns(2)
+            monthly_net_income = c1.number_input("Monthly net income", min_value=0, value=150000, step=5000)
+            employment_type = c2.selectbox("Employment type", list(score_vars["employment_type"].keys()))
+            employment_tenure_months = st.number_input("Employment tenure (months)", min_value=0, max_value=600, value=24)
+
+        with tab3:
+            c1, c2 = st.columns(2)
+            bureau_flag = c1.selectbox("Credit bureau flag", list(score_vars["bureau_flag"].keys()))
+            existing_obligations_ratio = c2.slider("Existing obligations ratio (%)", min_value=0, max_value=100, value=25)
+
+        with tab4:
+            c1, c2, c3 = st.columns(3)
+            account_turnover_strength = c1.selectbox("Account turnover strength", list(score_vars["account_turnover_strength"].keys()))
+            savings_behaviour = c2.selectbox("Savings behaviour", list(score_vars["savings_behaviour"].keys()))
+            bvn_verification = c3.selectbox("BVN verification", list(score_vars["bvn_verification"].keys()))
+            bank_account_vintage_months = st.number_input("Bank account vintage (months)", min_value=0, max_value=600, value=18)
+
+        notes = st.text_area("Credit officer notes")
+        submit = st.form_submit_button("Run scorecard")
+
+    if submit:
+        application = {
+            "application_id": application_id,
+            "branch": branch,
+            "officer_name": officer_name,
+            "age": age,
+            "monthly_net_income": monthly_net_income,
+            "employment_type": employment_type,
+            "employment_tenure_months": employment_tenure_months,
+            "residence_stability_months": residence_stability_months,
+            "bureau_flag": bureau_flag,
+            "existing_obligations_ratio": existing_obligations_ratio,
+            "account_turnover_strength": account_turnover_strength,
+            "savings_behaviour": savings_behaviour,
+            "bvn_verification": bvn_verification,
+            "bank_account_vintage_months": bank_account_vintage_months,
+            "notes": notes,
+        }
+        validation_errors = validate_application(application)
+        if validation_errors:
+            for err in validation_errors:
+                st.error(err)
+        else:
+            existing = load_table(SCORED_APPLICATIONS_FILE, SCORED_COLUMNS)
+            if not existing.empty and application_id in existing["application_id"].astype(str).tolist():
+                st.warning("Duplicate application ID detected. Review whether this is a resubmission or a duplicate entry.")
+
+            result = compute_score(application, rules)
+            explanations = explain_result(result["component_scores"], result["reject_reasons"])
+            log_scoring_event(application, result, current_user, current_role, scorecard_version)
+
+            append_row(SCORED_APPLICATIONS_FILE, {
+                **application,
+                "total_score": result["total_score"],
+                "decision": result["decision"],
+                "risk_band": result["risk_band"],
+                "reject_reasons": " | ".join(result["reject_reasons"]),
+                "final_decision": result["decision"],
+                "override_flag": "No",
+                "timestamp": datetime.now().isoformat(timespec="seconds"),
+            }, SCORED_COLUMNS)
+
+            left, right = st.columns([1.1, 0.9])
+            with left:
+                result_summary_card(result["total_score"], result["decision"], result["risk_band"], result["recommendation"])
+                st.markdown('<div class="section-card">', unsafe_allow_html=True)
+                st.subheader("Component score breakdown")
+                breakdown_df = pd.DataFrame({"Component": list(result["component_scores"].keys()), "Points": list(result["component_scores"].values())})
+                st.dataframe(breakdown_df, use_container_width=True, hide_index=True)
+                st.markdown('</div>', unsafe_allow_html=True)
+            with right:
+                st.markdown('<div class="section-card">', unsafe_allow_html=True)
+                st.subheader("Score visualization")
+                st.plotly_chart(score_gauge(result["total_score"], cutoffs["approve"], cutoffs["refer"]), use_container_width=True)
+                st.markdown('</div>', unsafe_allow_html=True)
+
+            c1, c2 = st.columns(2)
+            with c1:
+                st.markdown('<div class="section-card">', unsafe_allow_html=True)
+                st.subheader("Positive drivers")
+                for item in explanations["positive_factors"]:
+                    st.write(f"• {item}")
+                st.markdown('</div>', unsafe_allow_html=True)
+            with c2:
+                st.markdown('<div class="section-card">', unsafe_allow_html=True)
+                st.subheader("Policy flags and constraints")
+                for item in explanations["policy_flags"]:
+                    st.write(f"• {item}")
+                if explanations["negative_factors"]:
+                    st.caption("Negative contributors")
+                    for item in explanations["negative_factors"]:
+                        st.write(f"• {item}")
+                st.markdown('</div>', unsafe_allow_html=True)
+
+            if result["decision"] == "Approve":
+                status_banner("Application meets current policy threshold and may proceed to the next stage of approval workflow.", "success")
+            elif result["decision"] == "Refer":
+                status_banner("Application requires manual review before final credit action is taken.", "warning")
+            else:
+                status_banner("Application should be declined under the current policy unless an exceptional governance process applies.", "error")
+
+            st.markdown('<div class="section-card">', unsafe_allow_html=True)
+            st.subheader("Override workflow")
+            override_allowed = can_override(current_role)
+            override_decision = st.selectbox("Override decision", ["Approve", "Refer", "Decline"], index=["Approve", "Refer", "Decline"].index(result["decision"]), key="ov_decision")
+            override_reason = st.text_area("Override reason", key="ov_reason")
+            if st.button("Record override", disabled=not override_allowed):
+                success, message = apply_override_to_logs(
+                    application_id=application_id,
+                    original_decision=result["decision"],
+                    overridden_decision=override_decision,
+                    override_reason=override_reason,
+                    override_user=current_user,
+                    override_user_role=current_role,
+                    credit_officer_notes=notes,
+                )
+                status_banner(message, "success" if success else "error")
+            if not override_allowed:
+                st.info("Current role is read-only for overrides. Switch role to approver or admin to test override workflow.")
+            st.markdown('</div>', unsafe_allow_html=True)
+
+# -------------------------------
+# PAGE: BATCH SCORING
+# -------------------------------
+elif page == "Batch Scoring":
+    page_header("Batch Scoring", "Upload multiple loan applications, validate rows, score valid cases, and generate exception reports.")
+    st.markdown('<div class="section-card">', unsafe_allow_html=True)
+    st.subheader("Upload input file")
+    st.write("Supported formats: CSV and Excel (.xlsx). For Excel support, install openpyxl.")
+    uploaded_file = st.file_uploader("Select batch file", type=["csv", "xlsx"])
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    with st.expander("View required input schema", expanded=False):
+        st.dataframe(pd.DataFrame({"required_column": REQUIRED_BATCH_COLUMNS}), use_container_width=True, hide_index=True)
+
+    if uploaded_file is not None:
+        try:
+            if uploaded_file.name.lower().endswith(".csv"):
+                batch_df = pd.read_csv(uploaded_file)
+            else:
+                batch_df = pd.read_excel(uploaded_file)
+
+            st.markdown('<div class="section-card">', unsafe_allow_html=True)
+            st.subheader("Uploaded data preview")
+            st.dataframe(batch_df.head(10), use_container_width=True)
+            st.markdown('</div>', unsafe_allow_html=True)
+
+            if st.button("Run batch scoring", type="primary"):
+                scored_df, exceptions_df, summary = process_batch(batch_df, DEFAULT_RULES)
+                overwrite_table(BATCH_SCORED_OUTPUT_FILE, scored_df, list(scored_df.columns) if not scored_df.empty else SCORED_COLUMNS)
+                overwrite_table(BATCH_EXCEPTION_OUTPUT_FILE, exceptions_df, list(exceptions_df.columns) if not exceptions_df.empty else REQUIRED_BATCH_COLUMNS + ["row_number", "error_type", "error_details"])
+
+                existing_store = load_table(SCORED_APPLICATIONS_FILE, SCORED_COLUMNS)
+                existing_ids = set(existing_store["application_id"].astype(str).tolist()) if not existing_store.empty else set()
+                for _, r in scored_df.iterrows():
+                    if str(r["application_id"]) not in existing_ids:
+                        append_row(SCORED_APPLICATIONS_FILE, {
+                            "application_id": r["application_id"],
+                            "branch": r["branch"],
+                            "officer_name": r["officer_name"],
+                            "age": r["age"],
+                            "monthly_net_income": r["monthly_net_income"],
+                            "employment_type": r["employment_type"],
+                            "employment_tenure_months": r["employment_tenure_months"],
+                            "residence_stability_months": r["residence_stability_months"],
+                            "bureau_flag": r["bureau_flag"],
+                            "existing_obligations_ratio": r["existing_obligations_ratio"],
+                            "account_turnover_strength": r["account_turnover_strength"],
+                            "savings_behaviour": r["savings_behaviour"],
+                            "bvn_verification": r["bvn_verification"],
+                            "bank_account_vintage_months": r["bank_account_vintage_months"],
+                            "notes": "Batch upload",
+                            "total_score": r["total_score"],
+                            "decision": r["decision"],
+                            "risk_band": r["risk_band"],
+                            "reject_reasons": r["reject_reasons"],
+                            "final_decision": r["decision"],
+                            "override_flag": "No",
+                            "timestamp": datetime.now().isoformat(timespec="seconds"),
+                        }, SCORED_COLUMNS)
+                        existing_ids.add(str(r["application_id"]))
+
+                c1, c2, c3, c4, c5, c6 = st.columns(6)
+                with c1: kpi_card("Rows uploaded", f"{summary['rows_uploaded']:,}")
+                with c2: kpi_card("Rows scored", f"{summary['rows_scored']:,}")
+                with c3: kpi_card("Rows failed", f"{summary['rows_failed']:,}")
+                with c4: kpi_card("Approvals", f"{summary['approvals']:,}")
+                with c5: kpi_card("Referrals", f"{summary['referrals']:,}")
+                with c6: kpi_card("Average score", f"{summary['average_score']}")
+
+                if not scored_df.empty:
+                    left, right = st.columns(2)
+                    with left:
+                        st.markdown('<div class="section-card">', unsafe_allow_html=True)
+                        st.subheader("Batch decision distribution")
+                        tmp = scored_df.copy()
+                        tmp["decision"] = tmp["final_decision"]
+                        st.plotly_chart(decision_donut(tmp), use_container_width=True)
+                        st.markdown('</div>', unsafe_allow_html=True)
+                    with right:
+                        st.markdown('<div class="section-card">', unsafe_allow_html=True)
+                        st.subheader("Batch score distribution")
+                        st.plotly_chart(score_histogram(scored_df), use_container_width=True)
+                        st.markdown('</div>', unsafe_allow_html=True)
+
+                st.markdown('<div class="section-card">', unsafe_allow_html=True)
+                st.subheader("Scored output")
+                if scored_df.empty:
+                    st.info("No valid rows were available for scoring.")
+                else:
+                    st.dataframe(scored_df, use_container_width=True)
+                    st.download_button("Download scored output CSV", scored_df.to_csv(index=False).encode("utf-8"), "batch_scored_output.csv", "text/csv")
+                st.markdown('</div>', unsafe_allow_html=True)
+
+                st.markdown('<div class="section-card">', unsafe_allow_html=True)
+                st.subheader("Exception report")
+                if exceptions_df.empty:
+                    st.success("No row-level exceptions were detected.")
+                else:
+                    st.dataframe(exceptions_df, use_container_width=True)
+                    st.download_button("Download exception report CSV", exceptions_df.to_csv(index=False).encode("utf-8"), "batch_exceptions_output.csv", "text/csv")
+                st.markdown('</div>', unsafe_allow_html=True)
+
+        except Exception as e:
+            st.error(f"Batch processing failed: {str(e)}")
+
+# -------------------------------
+# PAGE: DECISION AUDIT
+# -------------------------------
+elif page == "Decision Audit":
+    page_header("Decision Audit & Search", "Search scored decisions, inspect audit records, and review overrides for governance control.")
+    audit_df = load_table(AUDIT_LOG_FILE, AUDIT_COLUMNS)
+    overrides_df = load_table(OVERRIDE_LOG_FILE, OVERRIDE_COLUMNS)
+
+    c1, c2, c3, c4 = st.columns(4)
+    with c1: kpi_card("Audit events", f"{len(audit_df):,}")
+    with c2: kpi_card("Overrides", f"{len(overrides_df):,}")
+    with c3: kpi_card("Audited approvals", f"{int((audit_df['final_decision'] == 'Approve').sum()) if not audit_df.empty else 0:,}")
+    with c4: kpi_card("Audited declines", f"{int((audit_df['final_decision'] == 'Decline').sum()) if not audit_df.empty else 0:,}")
+
+    st.markdown('<div class="section-card">', unsafe_allow_html=True)
+    st.subheader("Search historical decisions")
+    search_application = st.text_input("Search by application ID")
+    search_user = st.text_input("Search by user name")
+    decision_filter = st.multiselect("Filter by final decision", ["Approve", "Refer", "Decline"], default=["Approve", "Refer", "Decline"])
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    filtered_audit = audit_df.copy()
+    if not filtered_audit.empty:
+        if search_application.strip():
+            filtered_audit = filtered_audit[filtered_audit["application_id"].astype(str).str.contains(search_application.strip(), case=False, na=False)]
+        if search_user.strip():
+            filtered_audit = filtered_audit[filtered_audit["user_name"].astype(str).str.contains(search_user.strip(), case=False, na=False)]
+        filtered_audit = filtered_audit[filtered_audit["final_decision"].isin(decision_filter)]
+
+    st.markdown('<div class="section-card">', unsafe_allow_html=True)
+    st.subheader("Audit trail")
+    if filtered_audit.empty:
+        st.info("No audit records found for the selected filters.")
+    else:
+        audit_display = filtered_audit[[
+            "event_timestamp", "application_id", "user_name", "user_role", "scorecard_version",
+            "original_decision", "final_decision", "risk_band", "total_score", "override_flag", "override_reason"
+        ]].copy()
+        audit_display["final_decision"] = audit_display["final_decision"].apply(lambda x: decision_badge(str(x)))
+        st.write(audit_display.to_html(escape=False, index=False), unsafe_allow_html=True)
+        st.download_button("Download filtered audit log CSV", filtered_audit.to_csv(index=False).encode("utf-8"), "filtered_audit_log.csv", "text/csv")
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    st.markdown('<div class="section-card">', unsafe_allow_html=True)
+    st.subheader("Override register")
+    if overrides_df.empty:
+        st.info("No overrides have been recorded yet.")
+    else:
+        st.dataframe(overrides_df.sort_values("override_timestamp", ascending=False), use_container_width=True)
+        st.download_button("Download override log CSV", overrides_df.to_csv(index=False).encode("utf-8"), "override_log.csv", "text/csv")
+    st.markdown('</div>', unsafe_allow_html=True)
+
+# -------------------------------
+# PAGE: ADVANCED ANALYTICS (PHASE 4)
+# -------------------------------
+elif page == "Advanced Analytics":
+    page_header("Advanced Analytics", "Portfolio intelligence across decisions, branches, bureau segments, decline reasons, and overrides.")
+    df = load_table(SCORED_APPLICATIONS_FILE, SCORED_COLUMNS)
+    audit_df = load_table(AUDIT_LOG_FILE, AUDIT_COLUMNS)
+    overrides_df = load_table(OVERRIDE_LOG_FILE, OVERRIDE_COLUMNS)
+
+    if df.empty:
+        st.warning("No scored application data is available yet.")
+    else:
+        df = df.copy()
+        df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+        df["total_score"] = pd.to_numeric(df["total_score"], errors="coerce")
+        df["final_decision"] = df["final_decision"].fillna(df["decision"])
+
+        st.markdown('<div class="section-card">', unsafe_allow_html=True)
+        st.subheader("Analytics filters")
+        f1, f2, f3, f4 = st.columns(4)
+        decision_filter = f1.multiselect("Decision", sorted(df["final_decision"].dropna().unique().tolist()), default=sorted(df["final_decision"].dropna().unique().tolist()))
+        branch_filter = f2.multiselect("Branch", sorted(df["branch"].dropna().unique().tolist()), default=sorted(df["branch"].dropna().unique().tolist()))
+        employment_filter = f3.multiselect("Employment type", sorted(df["employment_type"].dropna().unique().tolist()), default=sorted(df["employment_type"].dropna().unique().tolist()))
+        score_range = f4.slider("Score range", 0, 120, (0, 120))
+        st.markdown('</div>', unsafe_allow_html=True)
+
+        filt = df[
+            df["final_decision"].isin(decision_filter)
+            & df["branch"].isin(branch_filter)
+            & df["employment_type"].isin(employment_filter)
+            & df["total_score"].between(score_range[0], score_range[1], inclusive="both")
+        ].copy()
+
+        c1, c2, c3, c4, c5, c6 = st.columns(6)
+        with c1: kpi_card("Filtered apps", f"{len(filt):,}")
+        with c2: kpi_card("Approval rate", f"{round((filt['final_decision'] == 'Approve').mean()*100,1) if len(filt) else 0}%")
+        with c3: kpi_card("Average score", f"{round(filt['total_score'].mean(),1) if len(filt) else 0}")
+        with c4: kpi_card("Median score", f"{round(filt['total_score'].median(),1) if len(filt) else 0}")
+        with c5: kpi_card("Overrides", f"{int(filt['override_flag'].fillna('No').eq('Yes').sum()):,}")
+        with c6: kpi_card("Branches", f"{filt['branch'].nunique() if len(filt) else 0}")
+
+        row1_left, row1_right = st.columns(2)
+        with row1_left:
+            st.markdown('<div class="section-card">', unsafe_allow_html=True)
+            st.subheader("Decision mix")
+            tmp = filt.copy()
+            tmp["decision"] = tmp["final_decision"]
+            st.plotly_chart(decision_donut(tmp), use_container_width=True)
+            st.markdown('</div>', unsafe_allow_html=True)
+        with row1_right:
+            st.markdown('<div class="section-card">', unsafe_allow_html=True)
+            st.subheader("Score distribution")
+            st.plotly_chart(score_histogram(filt), use_container_width=True)
+            st.markdown('</div>', unsafe_allow_html=True)
+
+        row2_left, row2_right = st.columns(2)
+        with row2_left:
+            st.markdown('<div class="section-card">', unsafe_allow_html=True)
+            st.subheader("Branch approval rates")
+            st.plotly_chart(branch_approval_rate(filt), use_container_width=True)
+            st.markdown('</div>', unsafe_allow_html=True)
+        with row2_right:
+            st.markdown('<div class="section-card">', unsafe_allow_html=True)
+            st.subheader("Bureau mix by final decision")
+            st.plotly_chart(bureau_mix_chart(filt), use_container_width=True)
+            st.markdown('</div>', unsafe_allow_html=True)
+
+        row3_left, row3_right = st.columns(2)
+        with row3_left:
+            st.markdown('<div class="section-card">', unsafe_allow_html=True)
+            st.subheader("Decline reason frequency")
+            decline_df = filt[filt["final_decision"] == "Decline"]
+            st.plotly_chart(decline_reason_bar(decline_df), use_container_width=True)
+            st.markdown('</div>', unsafe_allow_html=True)
+        with row3_right:
+            st.markdown('<div class="section-card">', unsafe_allow_html=True)
+            st.subheader("Overrides by user")
+            override_filt = overrides_df.copy()
+            if not override_filt.empty:
+                relevant_ids = set(filt["application_id"].astype(str).tolist())
+                override_filt = override_filt[override_filt["application_id"].astype(str).isin(relevant_ids)]
+            st.plotly_chart(override_by_user_chart(override_filt), use_container_width=True)
+            st.markdown('</div>', unsafe_allow_html=True)
+
+        st.markdown('<div class="section-card">', unsafe_allow_html=True)
+        st.subheader("Filtered portfolio detail")
+        detail_cols = [
+            "application_id", "branch", "officer_name", "employment_type", "bureau_flag",
+            "total_score", "decision", "final_decision", "override_flag", "timestamp"
+        ]
+        st.dataframe(filt[detail_cols].sort_values("timestamp", ascending=False), use_container_width=True)
+        st.download_button(
+            "Download filtered analytics dataset CSV",
+            filt.to_csv(index=False).encode("utf-8"),
+            "analytics_filtered_dataset.csv",
+            "text/csv",
+        )
+        st.markdown('</div>', unsafe_allow_html=True)
+
+# -------------------------------
+# FOOTER
+# -------------------------------
+st.markdown("---")
+st.caption(
+    "Ready-to-run single-file build. Install: streamlit, pandas, plotly. For Excel upload support also install openpyxl. "
+    "Run with: streamlit run Judgmental_Scorecard_App.py"
+)
