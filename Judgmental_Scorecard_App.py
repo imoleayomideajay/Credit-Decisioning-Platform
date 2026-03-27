@@ -1108,3 +1108,5 @@ st.caption(
     "Ready-to-run single-file build. Install: streamlit, pandas, plotly. For Excel upload support also install openpyxl. "
     "Run with: streamlit run Judgmental_Scorecard_App.py"
 )
+pip install streamlit pandas plotly openpyxl
+streamlit run Judgmental_Scorecard_App.py
